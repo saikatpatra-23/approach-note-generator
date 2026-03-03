@@ -212,7 +212,7 @@ def render_step1() -> None:
                 "summary":       summary.strip(),
             }
 
-            api_key = ANTHROPIC_API_KEY
+            api_key = ANTHROPIC_API_KEY or get_secret("ANTHROPIC_API_KEY")
             if not api_key:
                 st.error("ANTHROPIC_API_KEY not set. Add it to the .env file.")
                 return

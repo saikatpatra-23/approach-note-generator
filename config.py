@@ -1,10 +1,11 @@
-from dotenv import load_dotenv
+import os
 
-from secrets_utils import get_secret
+from dotenv import load_dotenv
 
 load_dotenv()
 
-ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY")
+# Keep module import side-effect free from Streamlit runtime requirements.
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 CLAUDE_MODEL = "claude-sonnet-4-6"
 MAX_TOKENS_PROBE = 1024
