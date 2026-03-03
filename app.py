@@ -8,11 +8,12 @@ Step 3: Preview sections & download Word document
 """
 from __future__ import annotations
 
-import os
 import json
 
 import streamlit as st
 from dotenv import load_dotenv
+
+from secrets_utils import get_secret
 
 load_dotenv()
 
@@ -26,16 +27,7 @@ st.set_page_config(
 
 # ── Password gate ─────────────────────────────────────────────────────────────
 
-def _get_secret(key: str, default: str = "") -> str:
-    val = os.getenv(key, "")
-    if val:
-        return val
-    try:
-        return st.secrets.get(key, default)
-    except Exception:
-        return default
-
-APP_PASSWORD = _get_secret("APP_PASSWORD")
+APP_PASSWORD = get_secret("APP_PASSWORD")
 
 def _check_password() -> bool:
     """Show password form. Returns True if authenticated."""
