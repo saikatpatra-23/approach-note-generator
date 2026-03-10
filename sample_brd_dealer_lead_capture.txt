@@ -1,0 +1,82 @@
+Business Requirements Document (BRD)
+Project: Dealer Mobile App – Lead Capture Module
+Client: Automotive OEM (Confidential)
+Version: 1.0
+Date: March 2026
+
+1. EXECUTIVE SUMMARY
+The client requires a mobile application for their dealer network to capture, manage, and track sales leads in the field. Currently, dealers rely on manual paper-based or Excel-based lead entry which results in data loss, delayed follow-ups, and poor CRM integration. The new Mobility App will streamline lead capture at dealership touchpoints.
+
+2. BUSINESS OBJECTIVES
+- Digitize lead capture process across 500+ dealer locations
+- Reduce lead response time from 48 hours to under 4 hours
+- Improve lead-to-conversion rate by 20%
+- Enable real-time sync with central Siebel CRM
+- Provide dealers with offline-capable mobile access
+
+3. SCOPE
+In Scope:
+- New lead creation (walk-in, phone, referral, event)
+- Lead detail capture: name, contact, vehicle interest, budget, source
+- Lead status tracking: New > Contacted > Test Drive > Negotiation > Won/Lost
+- Follow-up reminder and notification system
+- CRM sync (Siebel CRM integration via REST API)
+- Dealer-wise dashboard and lead summary
+- Manager view with team performance metrics
+- Offline mode with sync on connectivity restore
+
+Out of Scope:
+- Payment processing
+- Vehicle inventory management
+- Customer service / after-sales module
+
+4. FUNCTIONAL REQUIREMENTS
+
+4.1 Lead Capture
+- FR01: Dealer must be able to create a new lead with mandatory fields: customer name, phone number, vehicle category of interest
+- FR02: System shall support lead source tagging: Walk-in, Outbound Call, Digital Campaign, Event, Referral
+- FR03: Lead form must support photo capture for business cards (OCR optional in phase 2)
+- FR04: Dealer must be able to attach notes and voice memos to a lead
+
+4.2 Lead Management
+- FR05: Leads must display in a sortable, filterable list view
+- FR06: System shall support lead status pipeline view (Kanban-style)
+- FR07: Dealer must be able to reassign leads to colleagues
+- FR08: Duplicate lead detection based on phone number
+
+4.3 Follow-up & Notifications
+- FR09: System shall allow dealers to set follow-up dates with reminder push notifications
+- FR10: Overdue follow-ups must be highlighted in the lead list
+- FR11: Manager shall receive daily summary notification of team lead activity
+
+4.4 CRM Integration
+- FR12: All leads must sync to Siebel CRM within 5 minutes of creation
+- FR13: Lead updates in CRM must reflect back in mobile app within 15 minutes
+- FR14: Sync conflict resolution: mobile app data takes precedence for field updates
+
+4.5 Reporting
+- FR15: Dealer dashboard showing: total leads, conversion rate, avg response time
+- FR16: Manager dashboard with team-wise breakdown
+- FR17: Export to Excel/PDF
+
+5. NON-FUNCTIONAL REQUIREMENTS
+- NFR01: App must support Android 10+ and iOS 14+
+- NFR02: Offline mode must support up to 72 hours without connectivity
+- NFR03: App load time < 3 seconds on 4G network
+- NFR04: Data encrypted at rest and in transit (AES-256, TLS 1.2+)
+- NFR05: Support 10,000 concurrent dealer users
+
+6. TIMELINE
+- Phase 1 (Lead Capture + CRM Sync): Q2 2026 (June delivery)
+- Phase 2 (OCR, Advanced Analytics): Q3 2026
+
+7. STAKEHOLDERS
+- Business Owner: VP Sales, Automotive OEM
+- Primary Users: Field Dealers, Sales Managers
+- IT: CRM Team (Siebel), Mobile Platform Team
+- Vendor: TaTa Technologies (Solution Provider)
+
+8. ASSUMPTIONS
+- Siebel CRM APIs will be made available by client IT within 2 weeks of project kickoff
+- Client will provide test device pool (Android + iOS) for UAT
+- Dealer onboarding and training handled by client internal team

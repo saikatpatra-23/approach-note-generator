@@ -1,6 +1,6 @@
 """
 brd_parser.py
-Extract plain text from uploaded BRD files (PDF / DOCX / PPTX).
+Extract plain text from uploaded BRD and reference files.
 """
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ def parse_pptx(file_bytes: bytes) -> str:
     return "\n\n".join(parts)
 
 
-def parse_brd(filename: str, file_bytes: bytes) -> str:
+def parse_document(filename: str, file_bytes: bytes) -> str:
     """Route to correct parser based on file extension."""
     ext = filename.rsplit(".", 1)[-1].lower()
     if ext == "pdf":
@@ -68,5 +68,13 @@ def parse_brd(filename: str, file_bytes: bytes) -> str:
         return parse_docx(file_bytes)
     elif ext in ("pptx", "ppt"):
         return parse_pptx(file_bytes)
+    elif ext in ("txt", "md", "csv", "json", "yaml", "yml"):
+        return file_bytes.decode("utf-8", errors="ignore")
     else:
-        raise ValueError(f"Unsupported file type: .{ext}. Please upload PDF, DOCX, or PPTX.")
+        raise ValueError(
+            f"Unsupported file type: .{ext}. Please upload PDF, DOCX, PPTX, TXT, MD, CSV, or JSON."
+        )
+
+
+def parse_brd(filename: str, file_bytes: bytes) -> str:
+    return parse_document(filename, file_bytes)

@@ -1,0 +1,272 @@
+{
+  "template_families": [
+    {
+      "id": "proposal_generic_presales",
+      "name": "Proposal - Generic Presales",
+      "artifact_type": "proposal",
+      "domain": "generic",
+      "intent": "presales",
+      "audience": "Leadership / Steering Committee",
+      "description": "Reusable proposal structure for new opportunities across applications.",
+      "required_sections": [
+        "opportunity_overview",
+        "business_problem",
+        "proposed_solution",
+        "scope",
+        "delivery_approach",
+        "assumptions",
+        "risks",
+        "next_steps"
+      ],
+      "forbidden_sections": [
+        "raci",
+        "resource_loading",
+        "gantt_chart"
+      ],
+      "output_schema": {
+        "opportunity_overview": "string",
+        "business_problem": "string",
+        "proposed_solution": "string",
+        "scope": "string",
+        "delivery_approach": "string",
+        "assumptions": "string",
+        "risks": "string",
+        "next_steps": "string"
+      },
+      "export_renderer": "word",
+      "prompt_instructions": "Write a persuasive but practical proposal. Keep it solution-oriented and suitable for leadership review."
+    },
+    {
+      "id": "approach_note_functional",
+      "name": "Functional Approach Note",
+      "artifact_type": "approach_note",
+      "domain": "generic",
+      "intent": "functional",
+      "audience": "Business Stakeholders",
+      "description": "Functional approach note that explains what will change without implementation-level detail.",
+      "required_sections": [
+        "background",
+        "requirement_statement",
+        "impact_analysis",
+        "proposed_solution",
+        "reuse",
+        "business_benefit",
+        "assumptions",
+        "risks",
+        "open_items"
+      ],
+      "forbidden_sections": [
+        "effort_estimation",
+        "raci",
+        "resource_loading",
+        "gantt_chart",
+        "commercials"
+      ],
+      "output_schema": {
+        "background": "string",
+        "requirement_statement": "string",
+        "impact_analysis": {
+          "application_areas": [
+            {
+              "area": "string",
+              "impact": "Y/N/Partial",
+              "remarks": "string"
+            }
+          ],
+          "change_dimensions": [
+            {
+              "dimension": "string",
+              "applicable": "Y/N"
+            }
+          ]
+        },
+        "proposed_solution": "string",
+        "reuse": "string",
+        "business_benefit": "string",
+        "assumptions": "string",
+        "risks": "string",
+        "open_items": [
+          {
+            "sno": 1,
+            "item": "string",
+            "owner": "string",
+            "status": "string"
+          }
+        ]
+      },
+      "export_renderer": "word",
+      "prompt_instructions": "Write in functional business language only. Do not include effort, RACI, gantt, resource loading, or technical build instructions."
+    },
+    {
+      "id": "hls_solution_blueprint",
+      "name": "High Level Solution",
+      "artifact_type": "high_level_solution",
+      "domain": "generic",
+      "intent": "architecture",
+      "audience": "Technical Team",
+      "description": "Solution blueprint for technical and delivery alignment.",
+      "required_sections": [
+        "solution_summary",
+        "architecture_overview",
+        "solution_components",
+        "integration_touchpoints",
+        "security_and_scalability",
+        "delivery_considerations",
+        "assumptions",
+        "open_items"
+      ],
+      "forbidden_sections": [
+        "commercials",
+        "raci",
+        "resource_loading"
+      ],
+      "output_schema": {
+        "solution_summary": "string",
+        "architecture_overview": "string",
+        "solution_components": "string",
+        "integration_touchpoints": "string",
+        "security_and_scalability": "string",
+        "delivery_considerations": "string",
+        "assumptions": "string",
+        "open_items": "string"
+      },
+      "export_renderer": "word",
+      "prompt_instructions": "Provide a concise high level solution with technical clarity, but keep it implementation-agnostic."
+    },
+    {
+      "id": "effort_estimation_delivery",
+      "name": "Effort Estimation",
+      "artifact_type": "effort_estimate",
+      "domain": "generic",
+      "intent": "estimation",
+      "audience": "Delivery Team",
+      "description": "Structured effort estimate with work breakdown, assumptions, and risks.",
+      "required_sections": [
+        "estimate_summary",
+        "assumptions",
+        "work_breakdown",
+        "totals",
+        "risks",
+        "reuse_opportunities"
+      ],
+      "forbidden_sections": [
+        "commercials",
+        "raci",
+        "gantt_chart"
+      ],
+      "output_schema": {
+        "estimate_summary": "string",
+        "assumptions": [
+          "string"
+        ],
+        "work_breakdown": [
+          {
+            "workstream": "string",
+            "activity": "string",
+            "role": "string",
+            "effort_days": 0,
+            "remarks": "string"
+          }
+        ],
+        "totals": {
+          "total_effort_days": 0,
+          "recommended_team_shape": "string"
+        },
+        "risks": [
+          "string"
+        ],
+        "reuse_opportunities": [
+          "string"
+        ]
+      },
+      "export_renderer": "excel",
+      "prompt_instructions": "Return effort estimation only. No proposal copy, no RACI, and no gantt plan."
+    },
+    {
+      "id": "diagram_architecture",
+      "name": "Architecture Block Diagram",
+      "artifact_type": "diagram",
+      "domain": "generic",
+      "intent": "architecture_diagram",
+      "audience": "Technical Team",
+      "description": "Structured architecture block diagram.",
+      "required_sections": [
+        "title",
+        "objective",
+        "nodes",
+        "edges",
+        "notes"
+      ],
+      "forbidden_sections": [
+        "raci",
+        "gantt_chart"
+      ],
+      "output_schema": {
+        "title": "string",
+        "objective": "string",
+        "nodes": [
+          {
+            "id": "string",
+            "label": "string",
+            "category": "system|service|database|external"
+          }
+        ],
+        "edges": [
+          {
+            "source": "string",
+            "target": "string",
+            "label": "string"
+          }
+        ],
+        "notes": [
+          "string"
+        ]
+      },
+      "export_renderer": "svg",
+      "prompt_instructions": "Create a clean architecture diagram spec with 4-9 nodes and meaningful edges."
+    },
+    {
+      "id": "diagram_process_flow",
+      "name": "Process Flow Diagram",
+      "artifact_type": "diagram",
+      "domain": "generic",
+      "intent": "process_flow",
+      "audience": "Business Stakeholders",
+      "description": "Structured process flow diagram.",
+      "required_sections": [
+        "title",
+        "objective",
+        "nodes",
+        "edges",
+        "notes"
+      ],
+      "forbidden_sections": [
+        "raci",
+        "gantt_chart"
+      ],
+      "output_schema": {
+        "title": "string",
+        "objective": "string",
+        "nodes": [
+          {
+            "id": "string",
+            "label": "string",
+            "category": "start|process|decision|end"
+          }
+        ],
+        "edges": [
+          {
+            "source": "string",
+            "target": "string",
+            "label": "string"
+          }
+        ],
+        "notes": [
+          "string"
+        ]
+      },
+      "export_renderer": "svg",
+      "prompt_instructions": "Create a readable business process flow with clear sequence and decisions when needed."
+    }
+  ]
+}

@@ -1,57 +1,62 @@
 """
 app.py
-Approach Note Generator — 3-step Streamlit wizard.
+Solution Copilot Workspace.
 
-Step 1: Upload template + BRD, fill cover details
-Step 2: Probing chat with Claude
-Step 3: Preview sections & download Word document
+Create an opportunity workspace, ingest BRDs/reference docs, probe for missing
+context, auto-route the requested artifact, and export the generated output.
 """
 from __future__ import annotations
 
-import os
 import json
+from pathlib import Path
 
 import streamlit as st
 from dotenv import load_dotenv
 
+from artifact_renderers import render_artifact
+from brd_parser import parse_document
+from config import (
+    ANTHROPIC_API_KEY,
+    APP_PASSWORD,
+    APP_SUBTITLE,
+    APP_TITLE,
+    DEFAULT_AUDIENCES,
+    DEFAULT_DOMAINS,
+    DEFAULT_OUTPUT_PREFERENCES,
+    QUICK_ACTIONS,
+    RETRIEVAL_LIMIT,
+    WORKSPACE_DIR,
+)
+from copilot_session import OpportunityCopilotSession, build_preview_text
+from intent_router import IntentRouter
+from knowledge_base import KnowledgeBaseService
+from schemas import ArtifactType, GeneratedArtifact, SourceDocument, WorkspaceSnapshot, new_workspace_id
+from template_catalog import TemplateCatalog
+from workspace_store import WorkspaceStore
+
 load_dotenv()
 
-# ── Page config (must be first Streamlit call) ────────────────────────────────
 st.set_page_config(
-    page_title="Approach Note Generator",
-    page_icon="📋",
+    page_title=APP_TITLE,
+    page_icon="📌",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
-# ── Password gate ─────────────────────────────────────────────────────────────
-
-def _get_secret(key: str, default: str = "") -> str:
-    val = os.getenv(key, "")
-    if val:
-        return val
-    try:
-        return st.secrets.get(key, default)
-    except Exception:
-        return default
-
-APP_PASSWORD = _get_secret("APP_PASSWORD")
 
 def _check_password() -> bool:
-    """Show password form. Returns True if authenticated."""
     if st.session_state.get("authenticated"):
         return True
 
     st.markdown(
-        """
-        <div style='max-width:380px; margin: 80px auto; text-align:center'>
-        <h2 style='color:#0047AB'>📋 Approach Note Generator</h2>
-        <p style='color:#555'>Tata Technologies — Internal Tool</p>
+        f"""
+        <div style='max-width:420px; margin: 90px auto; text-align:center'>
+        <h2 style='color:#114B8C'>📌 {APP_TITLE}</h2>
+        <p style='color:#555'>{APP_SUBTITLE}</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         pwd = st.text_input("Enter access password", type="password", key="pwd_input")
@@ -68,410 +73,644 @@ if APP_PASSWORD and not _check_password():
     st.stop()
 
 
-# ── Imports (after auth gate — avoid loading heavy deps on login screen) ──────
+@st.cache_resource
+def get_catalog() -> TemplateCatalog:
+    return TemplateCatalog()
 
-from brd_parser import parse_brd
-from claude_client import ApproachNoteSession
-from doc_generator import build_approach_note
-from prompts import SECTIONS
-from config import (
-    ANTHROPIC_API_KEY,
-    MIN_PROBE_ROUNDS,
-    APPLICATIONS,
-    MODULES,
-    BUSINESS_UNITS,
-    CHANGE_TYPES,
-    TIMELINES,
-    COMPLEXITIES,
-    PROJECTS,
-)
 
-# ── Custom CSS ────────────────────────────────────────────────────────────────
+@st.cache_resource
+def get_workspace_store() -> WorkspaceStore:
+    return WorkspaceStore()
 
-st.markdown(
-    """
-    <style>
-    .step-header {font-size: 1.4rem; font-weight: 700; color: #0047AB; margin-bottom: 0.2rem;}
-    .step-sub    {color: #555; font-size: 0.9rem; margin-bottom: 1.2rem;}
-    .chat-user   {background:#DCE6F1; border-radius:8px; padding:10px 14px; margin:6px 0;}
-    .chat-bot    {background:#F0F4F8; border-radius:8px; padding:10px 14px; margin:6px 0;}
-    .ready-badge {background:#198754; color:white; padding:4px 10px; border-radius:12px;
-                  font-size:0.8rem; font-weight:600;}
-    div[data-testid="stButton"] button {border-radius: 8px;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
-# ── Session state initialisation ──────────────────────────────────────────────
+@st.cache_resource
+def get_knowledge_base() -> KnowledgeBaseService:
+    return KnowledgeBaseService()
+
+
+@st.cache_resource
+def get_router() -> IntentRouter:
+    return IntentRouter(get_catalog())
+
+
+@st.cache_resource
+def get_copilot() -> OpportunityCopilotSession | None:
+    if not ANTHROPIC_API_KEY:
+        return None
+    return OpportunityCopilotSession(api_key=ANTHROPIC_API_KEY)
+
 
 def _init_state() -> None:
     defaults = {
-        "step": 1,
+        "workspace": None,
+        "similar_contexts": [],
+        "example_matches": [],
+        "route_decision": None,
+        "generated_artifact": None,
+        "artifact_request_input": "",
+        "artifact_payload_editor": "",
         "template_bytes": None,
-        "brd_text": None,
-        "cover_details": {},
-        "session": None,          # ApproachNoteSession
-        "chat_history": [],       # list of (role, text)
-        "sections": {},           # generated content dict
-        "doc_bytes": None,
+        "approver_name": "",
     }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-_init_state()
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# STEP 1 — Setup
-# ═══════════════════════════════════════════════════════════════════════════════
+def _reset_runtime_state() -> None:
+    for key in [
+        "workspace",
+        "similar_contexts",
+        "example_matches",
+        "route_decision",
+        "generated_artifact",
+        "artifact_request_input",
+        "artifact_payload_editor",
+        "template_bytes",
+    ]:
+        st.session_state[key] = None if key in {"workspace", "route_decision", "generated_artifact", "template_bytes"} else []
+    st.session_state.artifact_request_input = ""
+    st.session_state.similar_contexts = []
+    st.session_state.example_matches = []
+    st.session_state.artifact_payload_editor = ""
 
-def render_step1() -> None:
-    st.markdown('<div class="step-header">Step 1 — Upload Documents & Fill Cover Details</div>', unsafe_allow_html=True)
-    st.markdown('<div class="step-sub">Upload the Approach Note template and BRD, then fill in the CR details below.</div>', unsafe_allow_html=True)
 
-    # ── File uploads ──────────────────────────────────────────────────────────
-    col_l, col_r = st.columns(2)
-    with col_l:
-        tmpl_file = st.file_uploader(
-            "Upload Approach Note Template (.docx)",
-            type=["docx"],
-            key="tmpl_upload",
-            help="The standard template .docx — used for page layout and styles only.",
+def _workspace_upload_dir(workspace_id: str) -> Path:
+    path = WORKSPACE_DIR / workspace_id / "uploads"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _save_upload(workspace_id: str, uploaded_file) -> str:
+    path = _workspace_upload_dir(workspace_id) / uploaded_file.name
+    path.write_bytes(uploaded_file.getvalue())
+    return str(path)
+
+
+def _summary_from_message(message: str) -> str:
+    parts = [part.strip() for part in message.split("\n") if part.strip()]
+    if not parts:
+        return ""
+    summary_lines = []
+    for part in parts:
+        summary_lines.append(part)
+        if part.endswith("?"):
+            break
+        if len(summary_lines) >= 3:
+            break
+    return " ".join(summary_lines).replace("?", ".").strip()
+
+
+def _load_workspace(workspace_id: str) -> None:
+    store = get_workspace_store()
+    kb = get_knowledge_base()
+    workspace = store.load(workspace_id)
+    st.session_state.workspace = workspace
+    st.session_state.template_bytes = None
+    if workspace.default_template_path:
+        template_path = Path(workspace.default_template_path)
+        if template_path.exists():
+            st.session_state.template_bytes = template_path.read_bytes()
+    st.session_state.similar_contexts = store.find_similar(workspace, limit=RETRIEVAL_LIMIT)
+    st.session_state.example_matches = kb.search_examples(
+        workspace.combined_context,
+        domain=workspace.inferred_domain.lower().replace(" ", "_"),
+        limit=RETRIEVAL_LIMIT,
+    )
+    st.session_state.route_decision = None
+    st.session_state.generated_artifact = workspace.artifacts[-1] if workspace.artifacts else None
+    if st.session_state.generated_artifact:
+        st.session_state.artifact_payload_editor = json.dumps(
+            st.session_state.generated_artifact.payload,
+            indent=2,
         )
-    with col_r:
+
+
+def _persist_workspace(workspace: WorkspaceSnapshot) -> None:
+    store = get_workspace_store()
+    kb = get_knowledge_base()
+    store.save(workspace)
+    kb.record_workspace(workspace)
+
+
+def _handle_workspace_creation() -> None:
+    router = get_router()
+    kb = get_knowledge_base()
+    copilot = get_copilot()
+
+    with st.form("workspace_create_form", clear_on_submit=False):
+        st.markdown("#### Create Opportunity Workspace")
+        c1, c2 = st.columns(2)
+        workspace_name = c1.text_input("Workspace Name", placeholder="e.g. Dealer Mobile App Lead Capture")
+        application_name = c2.text_input("Application / Platform", placeholder="e.g. Mobility App, Siebel CRM, React Portal")
+
+        c3, c4 = st.columns(2)
+        module_name = c3.text_input("Module / Capability", placeholder="e.g. Lead Management, Survey Capture")
+        audience = c4.selectbox("Primary Audience", DEFAULT_AUDIENCES)
+
+        c5, c6 = st.columns(2)
+        domain_hint = c5.selectbox("Domain Hint", DEFAULT_DOMAINS)
+        output_preference = c6.selectbox("Preferred Detail", DEFAULT_OUTPUT_PREFERENCES, index=1)
+
+        business_context = st.text_area(
+            "Opportunity / Business Context",
+            placeholder="Share what the team is trying to solve, client context, timeline pressure, or any useful background.",
+            height=100,
+        )
+
         brd_file = st.file_uploader(
-            "Upload BRD (PDF / DOCX / PPTX)",
-            type=["pdf", "docx", "pptx", "ppt"],
-            key="brd_upload",
-            help="The Business Requirements Document for this CR.",
+            "Primary BRD / requirement document",
+            type=["pdf", "docx", "pptx", "ppt", "txt", "md", "csv", "json"],
+            key="workspace_brd",
+        )
+        reference_files = st.file_uploader(
+            "Reference documents (optional)",
+            type=["pdf", "docx", "pptx", "ppt", "txt", "md", "csv", "json"],
+            accept_multiple_files=True,
+            key="workspace_refs",
+        )
+        word_template = st.file_uploader(
+            "Default Word template for exports (optional)",
+            type=["docx"],
+            key="workspace_template",
         )
 
-    st.divider()
+        create_clicked = st.form_submit_button("Create Workspace", type="primary")
 
-    # ── Cover details form ────────────────────────────────────────────────────
-    st.markdown("#### CR Cover Details")
+    if not create_clicked:
+        return
 
-    c1, c2, c3, c4 = st.columns(4)
-    cr_number   = c1.text_input("CR Number",  placeholder="e.g. CR-2024-1023")
-    project     = c2.selectbox("Project",     PROJECTS)
-    application = c3.selectbox("Application", APPLICATIONS)
-    module      = c4.selectbox("Module",      MODULES)
+    errors: list[str] = []
+    if not workspace_name.strip():
+        errors.append("Workspace name is required.")
+    if not brd_file:
+        errors.append("A primary BRD / requirement document is required.")
+    if errors:
+        for error in errors:
+            st.error(error)
+        return
 
-    c5, c6, c7, c8 = st.columns(4)
-    change_type   = c5.selectbox("Change Type",    CHANGE_TYPES)
-    timeline      = c6.selectbox("Timeline",       TIMELINES)
-    business_unit = c7.selectbox("Business Unit",  BUSINESS_UNITS)
-    complexity    = c8.selectbox("Complexity",      COMPLEXITIES)
-
-    c9, c10, c11 = st.columns(3)
-    brm_name = c9.text_input("BRM Name",  placeholder="Business Relationship Manager")
-    bpo_name = c10.text_input("BPO Name", placeholder="Business Process Owner")
-    ba_name  = c11.text_input("BA Name",  placeholder="Your name")
-
-    summary = st.text_area(
-        "CR Summary (2-3 lines)",
-        placeholder="Brief description of what this change is about and why it is needed.",
-        height=90,
-    )
-
-    st.divider()
-
-    # ── Validation & proceed ──────────────────────────────────────────────────
-    if st.button("Start Analysis →", type="primary", use_container_width=False):
-        errors = []
-        if not tmpl_file:
-            errors.append("Please upload the Approach Note template (.docx).")
-        if not brd_file:
-            errors.append("Please upload the BRD.")
-        if not cr_number.strip():
-            errors.append("CR Number is required.")
-        if not ba_name.strip():
-            errors.append("BA Name is required.")
-        if not summary.strip():
-            errors.append("CR Summary is required.")
-
-        if errors:
-            for e in errors:
-                st.error(e)
-            return
-
-        with st.spinner("Parsing BRD and initialising Claude..."):
-            try:
-                brd_bytes = brd_file.read()
-                brd_text  = parse_brd(brd_file.name, brd_bytes)
-            except Exception as exc:
-                st.error(f"Failed to parse BRD: {exc}")
-                return
-
-            cover = {
-                "cr_number":     cr_number.strip(),
-                "project":       project,
-                "application":   application,
-                "module":        module,
-                "change_type":   change_type,
-                "timeline":      timeline,
-                "business_unit": business_unit,
-                "complexity":    complexity,
-                "brm_name":      brm_name.strip(),
-                "bpo_name":      bpo_name.strip(),
-                "ba_name":       ba_name.strip(),
-                "summary":       summary.strip(),
-            }
-
-            api_key = ANTHROPIC_API_KEY
-            if not api_key:
-                st.error("ANTHROPIC_API_KEY not set. Add it to the .env file.")
-                return
-
-            session = ApproachNoteSession(
-                api_key=api_key,
-                brd_text=brd_text,
-                cover_details=cover,
+    workspace_id = new_workspace_id()
+    source_documents: list[SourceDocument] = []
+    try:
+        brd_text = parse_document(brd_file.name, brd_file.getvalue())
+        brd_path = _save_upload(workspace_id, brd_file)
+        source_documents.append(
+            SourceDocument(
+                name=brd_file.name,
+                role="primary_brd",
+                text=brd_text,
+                extension=brd_file.name.rsplit(".", 1)[-1].lower(),
+                file_path=brd_path,
             )
+        )
+        for uploaded in reference_files or []:
+            ref_text = parse_document(uploaded.name, uploaded.getvalue())
+            ref_path = _save_upload(workspace_id, uploaded)
+            source_documents.append(
+                SourceDocument(
+                    name=uploaded.name,
+                    role="reference",
+                    text=ref_text,
+                    extension=uploaded.name.rsplit(".", 1)[-1].lower(),
+                    file_path=ref_path,
+                )
+            )
+    except Exception as exc:
+        st.error(f"Failed to parse uploaded documents: {exc}")
+        return
 
-            try:
-                first_message = session.start()
-            except Exception as exc:
-                st.error(f"Claude API error: {exc}")
-                return
+    template_path = None
+    if word_template:
+        template_path = _save_upload(workspace_id, word_template)
+        st.session_state.template_bytes = word_template.getvalue()
+    else:
+        st.session_state.template_bytes = None
 
-            st.session_state.template_bytes = tmpl_file.getvalue()
-            st.session_state.brd_text       = brd_text
-            st.session_state.cover_details  = cover
-            st.session_state.session        = session
-            st.session_state.chat_history   = [("assistant", first_message)]
-            st.session_state.step           = 2
+    workspace = WorkspaceSnapshot(
+        id=workspace_id,
+        name=workspace_name.strip(),
+        business_context=business_context.strip(),
+        application_name=application_name.strip(),
+        module_name=module_name.strip(),
+        audience=audience,
+        domain_hint=domain_hint,
+        output_preference=output_preference,
+        source_documents=source_documents,
+        default_template_path=template_path,
+    )
+    inferred_domain, domain_conf = router.infer_domain(workspace)
+    workspace.inferred_domain = inferred_domain.replace("_", " ").title() if inferred_domain != "generic" else "Generic Enterprise App"
+    workspace.inferred_app_type = application_name.strip() or inferred_domain
+    workspace.confidence = round(domain_conf, 2)
 
-        st.rerun()
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# STEP 2 — Probing Chat
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def render_step2() -> None:
-    session: ApproachNoteSession = st.session_state.session
-    cover   = st.session_state.cover_details
-
-    st.markdown('<div class="step-header">Step 2 — Probing Session</div>', unsafe_allow_html=True)
-    st.markdown(
-        f'<div class="step-sub">CR: <strong>{cover.get("cr_number", "")}</strong> | '
-        f'Module: <strong>{cover.get("module", "")}</strong> | '
-        f'BU: <strong>{cover.get("business_unit", "")}</strong></div>',
-        unsafe_allow_html=True,
+    store = get_workspace_store()
+    similar_contexts = store.find_similar(workspace, limit=RETRIEVAL_LIMIT)
+    example_matches = kb.search_examples(
+        workspace.combined_context,
+        domain=inferred_domain,
+        limit=RETRIEVAL_LIMIT,
     )
 
-    # ── BRD summary expander ──────────────────────────────────────────────────
-    with st.expander("View extracted BRD text", expanded=False):
-        st.text(st.session_state.brd_text[:3000] + (" ..." if len(st.session_state.brd_text) > 3000 else ""))
-
-    # ── Progress indicator ────────────────────────────────────────────────────
-    exchanges = session.exchange_count
-    ready     = session.ready_to_generate
-    min_ex    = MIN_PROBE_ROUNDS
-
-    prog_col, badge_col = st.columns([4, 1])
-    with prog_col:
-        progress = min(exchanges / min_ex, 1.0)
-        st.progress(progress, text=f"Exchanges: {exchanges} / {min_ex} minimum")
-    with badge_col:
-        if ready:
-            st.markdown('<span class="ready-badge">Ready to Generate</span>', unsafe_allow_html=True)
-
-    st.divider()
-
-    # ── Chat history ──────────────────────────────────────────────────────────
-    chat_container = st.container()
-    with chat_container:
-        for role, text in st.session_state.chat_history:
-            if role == "assistant":
-                st.markdown(
-                    f'<div class="chat-bot"><strong>Claude:</strong><br>{text.replace(chr(10), "<br>")}</div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    f'<div class="chat-user"><strong>You:</strong><br>{text.replace(chr(10), "<br>")}</div>',
-                    unsafe_allow_html=True,
-                )
-
-    st.divider()
-
-    # ── Input row ─────────────────────────────────────────────────────────────
-    input_col, btn_col = st.columns([5, 1])
-    with input_col:
-        user_input = st.text_area(
-            "Your response",
-            placeholder="Type your answer here...",
-            height=80,
-            key=f"user_input_{session.exchange_count}",
-            label_visibility="collapsed",
+    initial_message = ""
+    if copilot:
+        try:
+            initial_message = copilot.start_probe(workspace, similar_contexts, example_matches)
+            workspace.add_probe_turn("assistant", initial_message)
+            workspace.summary = _summary_from_message(initial_message)
+        except Exception as exc:
+            st.warning(f"Workspace created, but probing could not start automatically: {exc}")
+    else:
+        initial_message = (
+            "API key is not configured, so probing is unavailable. "
+            "You can still use the workspace and admin KB flows."
         )
-    with btn_col:
-        st.write("")  # spacing
-        send_clicked = st.button("Send →", type="primary", use_container_width=True)
+        workspace.add_probe_turn("assistant", initial_message)
+        workspace.summary = brd_text[:320]
 
-    if send_clicked and user_input.strip():
-        with st.spinner("Claude is thinking..."):
-            try:
-                reply = session.send(user_input.strip())
-            except Exception as exc:
-                st.error(f"API error: {exc}")
-                return
+    _persist_workspace(workspace)
+    st.session_state.workspace = workspace
+    st.session_state.similar_contexts = similar_contexts
+    st.session_state.example_matches = example_matches
+    st.session_state.route_decision = None
+    st.session_state.generated_artifact = None
+    st.session_state.artifact_request_input = ""
+    st.session_state.artifact_payload_editor = ""
+    st.success("Workspace created. Start probing or request an artifact.")
 
-        st.session_state.chat_history.append(("user", user_input.strip()))
-        st.session_state.chat_history.append(("assistant", reply))
+
+def _render_sidebar() -> None:
+    store = get_workspace_store()
+    kb = get_knowledge_base()
+    st.sidebar.markdown(f"## {APP_TITLE}")
+    st.sidebar.caption(APP_SUBTITLE)
+    st.sidebar.info(kb.connection_status())
+
+    if st.sidebar.button("Start New Workspace", use_container_width=True):
+        _reset_runtime_state()
         st.rerun()
 
-    st.divider()
-
-    # ── Generate button ───────────────────────────────────────────────────────
-    can_generate = ready or (exchanges >= min_ex)
-    gen_col, back_col = st.columns([2, 1])
-
-    with gen_col:
-        if can_generate:
-            if st.button("Generate Approach Note Document", type="primary", use_container_width=True):
-                with st.spinner("Claude is writing all 11 sections..."):
-                    try:
-                        sections = session.generate_document()
-                    except ValueError as exc:
-                        st.error(f"Generation error: {exc}")
-                        return
-                st.session_state.sections = sections
-                st.session_state.step = 3
-                st.rerun()
-        else:
-            st.info(f"Answer at least {min_ex} questions before generating (currently {exchanges}).")
-
-    with back_col:
-        if st.button("← Start Over", use_container_width=True):
-            for k in ["step", "template_bytes", "brd_text", "cover_details",
-                      "session", "chat_history", "sections", "doc_bytes"]:
-                st.session_state.pop(k, None)
-            _init_state()
+    st.sidebar.markdown("### Recent Workspaces")
+    recent = store.list_workspaces()[:8]
+    if not recent:
+        st.sidebar.caption("No saved workspaces yet.")
+    for workspace in recent:
+        label = workspace.name if len(workspace.name) < 28 else workspace.name[:25] + "..."
+        if st.sidebar.button(label, key=f"open_{workspace.id}", use_container_width=True):
+            _load_workspace(workspace.id)
             st.rerun()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# STEP 3 — Preview & Download
-# ═══════════════════════════════════════════════════════════════════════════════
+def _render_workspace_overview(workspace: WorkspaceSnapshot) -> None:
+    st.markdown("#### Workspace Overview")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Application", workspace.application_name or "-")
+    c2.metric("Module", workspace.module_name or "-")
+    c3.metric("Inferred Domain", workspace.inferred_domain)
+    c4.metric("Context Confidence", f"{int(workspace.confidence * 100)}%")
+    st.caption(workspace.summary or "Summary will become sharper as probing continues.")
 
-def render_step3() -> None:
-    cover    = st.session_state.cover_details
-    sections = st.session_state.sections
+    with st.expander("Source documents", expanded=False):
+        for document in workspace.source_documents:
+            st.markdown(f"**{document.name}** ({document.role})")
+            st.text(document.text[:1500] + (" ..." if len(document.text) > 1500 else ""))
 
-    st.markdown('<div class="step-header">Step 3 — Review & Download</div>', unsafe_allow_html=True)
-    st.markdown(
-        f'<div class="step-sub">Review each section below. Edit if needed, then generate the Word document.</div>',
-        unsafe_allow_html=True,
+    with st.expander("Similar recent contexts", expanded=False):
+        if not st.session_state.similar_contexts:
+            st.caption("No similar prior workspaces found yet.")
+        for match in st.session_state.similar_contexts:
+            st.markdown(
+                f"**{match['name']}** | similarity `{match['similarity']}` | "
+                f"{match.get('application_name') or '-'} / {match.get('module_name') or '-'}"
+            )
+            if match.get("summary"):
+                st.caption(match["summary"])
+
+
+def _render_probe_chat(workspace: WorkspaceSnapshot) -> None:
+    st.markdown("#### Adaptive Probing")
+    st.caption(
+        "The copilot uses BRD context first, then checks similar past workspaces. "
+        "If something looks close, it will ask whether the end product should stay aligned."
     )
+
+    for idx, turn in enumerate(workspace.probe_history):
+        role_label = "Copilot" if turn.role == "assistant" else "You"
+        background = "#F3F7FB" if turn.role == "assistant" else "#E8F2FF"
+        st.markdown(
+            f"<div style='background:{background}; padding:12px 14px; border-radius:10px; margin:8px 0;'>"
+            f"<strong>{role_label}:</strong><br>{turn.text.replace(chr(10), '<br>')}</div>",
+            unsafe_allow_html=True,
+        )
+
+    user_probe = st.text_area(
+        "Continue the context chat",
+        placeholder="Add missing context, confirm whether a similar older request still applies, or answer the latest question.",
+        height=100,
+        key=f"probe_input_{workspace.id}",
+    )
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        send_clicked = st.button("Send Context", type="primary", use_container_width=True)
+    with col2:
+        refresh_clicked = st.button("Ask Next Smart Question", use_container_width=True)
+
+    copilot = get_copilot()
+    if send_clicked and user_probe.strip():
+        workspace.add_probe_turn("user", user_probe.strip())
+        if not copilot:
+            st.warning("ANTHROPIC_API_KEY is not configured, so probing cannot continue.")
+        else:
+            try:
+                reply = copilot.continue_probe(
+                    workspace,
+                    st.session_state.similar_contexts,
+                    st.session_state.example_matches,
+                    user_message=user_probe.strip(),
+                )
+                workspace.add_probe_turn("assistant", reply)
+                workspace.summary = _summary_from_message(reply) or workspace.summary
+                _persist_workspace(workspace)
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not continue probing: {exc}")
+    elif refresh_clicked:
+        if not copilot:
+            st.warning("ANTHROPIC_API_KEY is not configured, so probing cannot continue.")
+        else:
+            try:
+                reply = copilot.continue_probe(
+                    workspace,
+                    st.session_state.similar_contexts,
+                    st.session_state.example_matches,
+                )
+                workspace.add_probe_turn("assistant", reply)
+                workspace.summary = _summary_from_message(reply) or workspace.summary
+                _persist_workspace(workspace)
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not generate the next question: {exc}")
+
+
+def _render_artifact_studio(workspace: WorkspaceSnapshot) -> None:
+    st.markdown("#### Artifact Studio")
+    st.caption("Ask for exactly what you want. The router will suggest a template family and keep the output scoped to that artifact only.")
+
+    action_cols = st.columns(3)
+    for idx, (label, prompt) in enumerate(QUICK_ACTIONS):
+        if action_cols[idx % 3].button(label, key=f"qa_{idx}", use_container_width=True):
+            st.session_state.artifact_request_input = prompt
+
+    request_text = st.text_input(
+        "Artifact request",
+        value=st.session_state.artifact_request_input,
+        placeholder="e.g. Share a functional approach note for this change, or create a proposal for this opportunity.",
+    )
+    st.session_state.artifact_request_input = request_text
+
+    route_col, clear_col = st.columns([2, 1])
+    with route_col:
+        route_clicked = st.button("Route Request", type="primary", use_container_width=True)
+    with clear_col:
+        if st.button("Clear Route", use_container_width=True):
+            st.session_state.route_decision = None
+            st.session_state.generated_artifact = None
+            st.session_state.artifact_payload_editor = ""
+            st.rerun()
+
+    router = get_router()
+    kb = get_knowledge_base()
+    catalog = get_catalog()
+    if route_clicked and request_text.strip():
+        route = router.route(
+            request_text,
+            workspace,
+            context_matches=st.session_state.similar_contexts,
+        )
+        st.session_state.route_decision = route
+        st.session_state.example_matches = kb.search_examples(
+            workspace.combined_context + "\n" + request_text,
+            artifact_type=route.artifact_type,
+            domain=route.domain,
+            intent=route.intent,
+            limit=RETRIEVAL_LIMIT,
+        )
+        st.session_state.generated_artifact = None
+        st.session_state.artifact_payload_editor = ""
+
+    route = st.session_state.route_decision
+    if not route:
+        _render_generated_artifact(workspace)
+        return
+
+    candidates = catalog.find_candidates(route.artifact_type, route.domain, route.intent)
+    if not candidates:
+        st.error("No template families are configured for this route.")
+        _render_generated_artifact(workspace)
+        return
+    candidate_ids = [candidate.id for candidate in candidates]
+    selected_template_id = st.selectbox(
+        "Template family",
+        candidate_ids,
+        index=max(candidate_ids.index(route.template_family_id), 0) if route.template_family_id in candidate_ids else 0,
+        format_func=lambda item: catalog.get(item).name,
+    )
+    route.template_family_id = selected_template_id
 
     st.info(
-        f"CR: **{cover.get('cr_number', '')}** | Module: **{cover.get('module', '')}** | "
-        f"BA: **{cover.get('ba_name', '')}** | Complexity: **{cover.get('complexity', '')}**"
+        f"Suggested artifact: **{route.artifact_type.replace('_', ' ').title()}** | "
+        f"Intent: **{route.intent}** | Domain: **{route.domain}** | "
+        f"Confidence: **{int(route.confidence * 100)}%**"
     )
+    st.caption(route.rationale)
+    if route.missing_context:
+        st.warning("Missing context that could improve output: " + ", ".join(route.missing_context))
 
-    # ── Editable section previews ─────────────────────────────────────────────
-    edited: dict = {}
+    with st.expander("References used for routing", expanded=False):
+        if not st.session_state.example_matches:
+            st.caption("No approved examples matched this request yet.")
+        for example in st.session_state.example_matches:
+            st.markdown(f"**{example['title']}** | similarity `{example['similarity']}`")
+            st.caption(example.get("summary", "")[:250])
 
-    for key, display_name in SECTIONS.items():
-        raw = sections.get(key, "")
+    if st.button("Generate Artifact", type="primary", use_container_width=True):
+        copilot = get_copilot()
+        if not copilot:
+            st.error("ANTHROPIC_API_KEY is not configured, so artifact generation is unavailable.")
+            return
+        try:
+            artifact = copilot.generate_artifact(
+                workspace,
+                route,
+                catalog.get(route.template_family_id),
+                request_text,
+                st.session_state.example_matches,
+                st.session_state.similar_contexts,
+            )
+            workspace.add_artifact(artifact)
+            st.session_state.generated_artifact = artifact
+            st.session_state.artifact_payload_editor = json.dumps(artifact.payload, indent=2)
+            _persist_workspace(workspace)
+            kb.record_artifact_run(workspace, route, artifact)
+            st.success("Artifact generated. Review and export below.")
+        except Exception as exc:
+            st.error(f"Artifact generation failed: {exc}")
 
-        with st.expander(display_name, expanded=False):
-            if isinstance(raw, list):
-                # Show as JSON in a text area for list sections
-                edited_text = st.text_area(
-                    f"Edit {display_name} (JSON)",
-                    value=json.dumps(raw, indent=2),
-                    height=200,
-                    key=f"edit_{key}",
-                )
-                try:
-                    edited[key] = json.loads(edited_text)
-                except json.JSONDecodeError:
-                    st.warning("Invalid JSON — using original content.")
-                    edited[key] = raw
-            else:
-                edited_text = st.text_area(
-                    f"Edit {display_name}",
-                    value=str(raw) if raw else "",
-                    height=200,
-                    key=f"edit_{key}",
-                )
-                edited[key] = edited_text
+    _render_generated_artifact(workspace)
+
+
+def _render_generated_artifact(workspace: WorkspaceSnapshot) -> None:
+    artifact: GeneratedArtifact | None = st.session_state.generated_artifact
+    if not artifact:
+        return
 
     st.divider()
+    st.markdown(f"#### Review: {artifact.title}")
+    if artifact.renderer == "svg":
+        svg_bytes, _, _ = render_artifact(
+            artifact,
+            workspace,
+            template_bytes=st.session_state.template_bytes,
+        )
+        st.markdown(svg_bytes.decode("utf-8"), unsafe_allow_html=True)
+    st.text_area(
+        "Preview",
+        value=artifact.preview_text,
+        height=220,
+        disabled=True,
+        key=f"preview_{workspace.id}",
+    )
+    editor_text = st.text_area(
+        "Edit artifact JSON",
+        value=st.session_state.artifact_payload_editor or json.dumps(artifact.payload, indent=2),
+        height=320,
+        key=f"artifact_editor_{workspace.id}",
+    )
+    st.session_state.artifact_payload_editor = editor_text
 
-    # ── Generate Word document ─────────────────────────────────────────────────
-    dl_col, back_col, restart_col = st.columns([2, 1, 1])
+    edit_col, download_col, approve_col = st.columns([1, 1, 1])
+    with edit_col:
+        if st.button("Save JSON Edits", use_container_width=True):
+            try:
+                artifact.payload = json.loads(editor_text)
+                artifact.preview_text = build_preview_text(artifact.artifact_type, artifact.payload)
+                _persist_workspace(workspace)
+                st.success("Artifact JSON updated.")
+            except json.JSONDecodeError as exc:
+                st.error(f"Invalid JSON: {exc}")
 
-    with dl_col:
-        if st.button("Build Word Document (.docx)", type="primary", use_container_width=True):
-            with st.spinner("Building Word document..."):
-                try:
-                    doc_bytes = build_approach_note(
-                        template_bytes=st.session_state.template_bytes,
-                        cover_details=cover,
-                        sections_dict=edited,
-                    )
-                    st.session_state.doc_bytes = doc_bytes
-                except Exception as exc:
-                    st.error(f"Document build error: {exc}")
-                    return
-            st.success("Document ready! Click the download button below.")
-
-    if st.session_state.doc_bytes:
-        cr = cover.get("cr_number", "CR").replace("/", "-").replace(" ", "_")
+    filename_root = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in artifact.title).strip("_") or "artifact"
+    export_bytes, mime_type, extension = render_artifact(
+        artifact,
+        workspace,
+        template_bytes=st.session_state.template_bytes,
+    )
+    with download_col:
         st.download_button(
-            label="Download Approach Note (.docx)",
-            data=st.session_state.doc_bytes,
-            file_name=f"Approach_Note_{cr}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            use_container_width=False,
+            "Download Export",
+            data=export_bytes,
+            file_name=f"{filename_root}{extension}",
+            mime=mime_type,
+            use_container_width=True,
         )
 
-    with back_col:
-        if st.button("← Back to Chat", use_container_width=True):
-            st.session_state.step = 2
-            st.rerun()
+    with approve_col:
+        approver_name = st.text_input(
+            "Approver Name",
+            value=st.session_state.approver_name,
+            key=f"approver_{workspace.id}",
+        )
+        st.session_state.approver_name = approver_name
+        if st.button("Approve for Reuse", use_container_width=True):
+            if not approver_name.strip():
+                st.error("Approver name is required before approval.")
+            else:
+                kb = get_knowledge_base()
+                kb.approve_artifact(workspace, artifact, approved_by=approver_name.strip())
+                artifact.approved = True
+                _persist_workspace(workspace)
+                st.success("Approved artifact added to the reusable knowledge base.")
 
-    with restart_col:
-        if st.button("Start New CR", use_container_width=True):
-            for k in ["step", "template_bytes", "brd_text", "cover_details",
-                      "session", "chat_history", "sections", "doc_bytes"]:
-                st.session_state.pop(k, None)
-            _init_state()
-            st.rerun()
 
+def _render_admin_library() -> None:
+    kb = get_knowledge_base()
+    st.markdown("#### Admin Knowledge Base")
+    st.caption("Upload approved templates or exemplars so the copilot can learn beyond the current workspace.")
+    st.info(kb.connection_status())
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Step router
-# ═══════════════════════════════════════════════════════════════════════════════
+    with st.form("kb_upload_form", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        title = col1.text_input("Reference title")
+        artifact_type = col2.selectbox("Artifact type", [item.value for item in ArtifactType])
+        col3, col4 = st.columns(2)
+        domain = col3.text_input("Domain", value="generic")
+        intent = col4.text_input("Intent", value="presales")
+        upload_file = st.file_uploader(
+            "Upload approved example/template",
+            type=["pdf", "docx", "pptx", "ppt", "txt", "md", "csv", "json"],
+            key="kb_upload_file",
+        )
+        submit = st.form_submit_button("Add to Knowledge Base", type="primary")
+
+    if submit:
+        if not title.strip() or not upload_file:
+            st.error("Both title and file are required.")
+        else:
+            try:
+                text_value = parse_document(upload_file.name, upload_file.getvalue())
+                kb.ingest_uploaded_reference(
+                    title=title.strip(),
+                    artifact_type=artifact_type,
+                    domain=domain.strip().lower() or "generic",
+                    intent=intent.strip().lower() or "generic",
+                    content_text=text_value,
+                    original_name=upload_file.name,
+                    file_bytes=upload_file.getvalue(),
+                )
+                st.success("Approved reference added to the library.")
+            except Exception as exc:
+                st.error(f"Could not ingest the uploaded reference: {exc}")
+
+    with st.expander("Recent approved references", expanded=False):
+        examples = kb.list_examples()[:10]
+        if not examples:
+            st.caption("No approved references yet.")
+        for example in examples:
+            st.markdown(
+                f"**{example['title']}** | `{example['artifact_type']}` | "
+                f"`{example['domain']}` | `{example['intent']}`"
+            )
+            st.caption(example.get("summary", "")[:260])
+
 
 def main() -> None:
-    # Breadcrumb header
-    steps = ["1. Setup", "2. Probing", "3. Download"]
-    current = st.session_state.get("step", 1)
+    _init_state()
+    _render_sidebar()
 
-    st.markdown(
-        "**Approach Note Generator** &nbsp;|&nbsp; " +
-        " → ".join(
-            f"**{s}**" if i + 1 == current else s
-            for i, s in enumerate(steps)
-        ),
-        unsafe_allow_html=True,
+    st.markdown(f"# {APP_TITLE}")
+    st.caption(APP_SUBTITLE)
+
+    workspace: WorkspaceSnapshot | None = st.session_state.workspace
+    workspace_tab, artifact_tab, admin_tab = st.tabs(
+        ["Workspace", "Artifact Studio", "Admin Library"]
     )
-    st.divider()
 
-    if current == 1:
-        render_step1()
-    elif current == 2:
-        render_step2()
-    elif current == 3:
-        render_step3()
+    with workspace_tab:
+        if not workspace:
+            _handle_workspace_creation()
+        else:
+            _render_workspace_overview(workspace)
+            st.divider()
+            _render_probe_chat(workspace)
 
+    with artifact_tab:
+        if not workspace:
+            st.info("Create or open a workspace first.")
+        else:
+            _render_artifact_studio(workspace)
 
-main()
+    with admin_tab:
+        _render_admin_library()
+
+if __name__ == "__main__":
+    main()
